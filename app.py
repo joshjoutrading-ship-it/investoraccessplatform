@@ -401,35 +401,92 @@ def load_twr(pid: str) -> pd.DataFrame:
 
 
 def find_overview_totals_gviz_heuristic(ov: pd.DataFrame) -> tuple[float, float]:
+    INVESTED_WORDS = {"invested", "principal"}
+    BALANCE_WORDS = {"balance", "current"}
     g = ov.copy().applymap(clean_str)
-    best = None  # (balance, invested, row_index)
+    best = None  # (confidence_score, invested, balance)
+
+    # Precompute column text (headers + column content)
+    column_text = {}
+    for c in range(g.shape[1]):
+        col_vals = g.iloc[:, c].astype(str).tolist()
+        column_text[c] = " ".join(col_vals).lower()
 
     for r in range(g.shape[0]):
         row_raw = [clean_str(x) for x in g.iloc[r, :].tolist()]
-        row_l = " ".join([x.lower() for x in row_raw if x and x.lower() != "none"])
-        if "total" not in row_l:
+        row_text = " ".join(
+            x.lower() for x in row_raw if x and x.lower() != "none"
+        )
+
+        # Must be a "total" row
+        if "total" not in row_text:
             continue
 
-        nums = []
-        for x in row_raw:
+        # Collect numeric candidates with column index
+        candidates = []
+        for c, x in enumerate(row_raw):
             v = to_num(x)
             if pd.notna(v) and abs(v) > 1.5:
-                nums.append(float(v))
+                candidates.append((c, float(v)))
 
-        if len(nums) < 2:
+        if len(candidates) < 2:
             continue
 
-        nums_sorted = sorted(nums, key=lambda z: abs(z), reverse=True)
-        top2 = nums_sorted[:2]
-        invested = min(top2)
-        balance = max(top2)
+        # Score candidates using semantic proximity
+        scored = []
+        for c, v in candidates:
+            invested_score = sum(
+                w in column_text[c] for w in INVESTED_WORDS
+            )
+            balance_score = sum(
+                w in column_text[c] for w in BALANCE_WORDS
+            )
+            scored.append((c, v, invested_score, balance_score))
 
-        if best is None or balance > best[0]:
-            best = (balance, invested, r)
+        # Try semantic assignment first
+        invested_cands = sorted(
+            scored, key=lambda x: x[2], reverse=True
+        )
+        balance_cands = sorted(
+            scored, key=lambda x: x[3], reverse=True
+        )
+
+        invested = None
+        balance = None
+        confidence = 0
+
+        if invested_cands[0][2] > 0:
+            invested = invested_cands[0][1]
+            confidence += invested_cands[0][2]
+
+        if balance_cands[0][3] > 0:
+            balance = balance_cands[0][1]
+            confidence += balance_cands[0][3]
+
+        # Fallback: structural position (left vs right)
+        if invested is None or balance is None:
+            left = min(candidates, key=lambda x: x[0])[1]
+            right = max(candidates, key=lambda x: x[0])[1]
+
+            if invested is None:
+                invested = left
+                confidence += 1
+            if balance is None:
+                balance = right
+                confidence += 1
+
+        # Reject nonsensical results
+        if invested is None or balance is None:
+            continue
+
+        # Keep best candidate by confidence
+        if best is None or confidence > best[0]:
+            best = (confidence, invested, balance)
 
     if best is None:
         return np.nan, np.nan
-    return float(best[1]), float(best[0])  # invested, balance
+    print(float(best[1]), float(best[2]))
+    return float(best[1]), float(best[2])
 
 
 def load_portfolio(portfolio_url: str) -> PortfolioData:
